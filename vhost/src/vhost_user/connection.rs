@@ -8,7 +8,7 @@
 use std::fs::File;
 use std::io::ErrorKind;
 use std::marker::PhantomData;
-use std::os::unix::io::{AsRawFd, FromRawFd, RawFd};
+use std::os::unix::io::{AsRawFd, FromRawFd, OwnedFd, RawFd};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::{mem, slice};
@@ -595,6 +595,12 @@ impl<H: MsgHeader> AsRawFd for Endpoint<H> {
     }
 }
 
+impl<H: MsgHeader> From<Endpoint<H>> for OwnedFd {
+    fn from(endpoint: Endpoint<H>) -> OwnedFd {
+        OwnedFd::from(endpoint.sock)
+    }
+}
+
 // Given a slice of sizes and the `skip_size`, return the offset of `skip_size` in the slice.
 // For example:
 //     let iov_lens = vec![4, 4, 5];
@@ -909,5 +915,24 @@ mod tests {
         let mut backend = Endpoint::<VhostUserMsgHeader<FrontendReq>>::from_stream(sock);
 
         assert!(matches!(backend.recv_header(), Err(Error::Disconnected)));
+    }
+
+    #[test]
+    fn endpoint_to_ownedfd() {
+        let path = temp_path();
+        let listener = Listener::new(&path, true).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let mut frontend = Endpoint::<VhostUserMsgHeader<FrontendReq>>::connect(&path).unwrap();
+        let sock = listener.accept().unwrap().unwrap();
+        let backend_orig = Endpoint::<VhostUserMsgHeader<FrontendReq>>::from_stream(sock);
+        let sock = UnixStream::from(OwnedFd::from(backend_orig));
+        let mut backend = Endpoint::<VhostUserMsgHeader<FrontendReq>>::from_stream(sock);
+
+        let buf1 = [0x1, 0x2, 0x3, 0x4];
+        let len = frontend.send_slice(&buf1[..], None).unwrap();
+        assert_eq!(len, 4);
+        let (bytes, buf2, _) = backend.recv_into_buf(0x1000).unwrap();
+        assert_eq!(bytes, 4);
+        assert_eq!(&buf1[..], &buf2[..bytes]);
     }
 }

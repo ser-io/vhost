@@ -3,6 +3,7 @@
 
 use std::io;
 use std::mem;
+use std::os::unix::io::OwnedFd;
 use std::os::unix::io::{AsRawFd, RawFd};
 use std::os::unix::net::UnixStream;
 use std::sync::{Arc, Mutex, MutexGuard};
@@ -176,6 +177,17 @@ impl VhostUserFrontendReqHandler for Backend {
     }
 }
 
+impl TryFrom<Backend> for OwnedFd {
+    type Error = &'static str;
+
+    fn try_from(backend: Backend) -> std::result::Result<Self, Self::Error> {
+        return match Arc::into_inner(backend.node) {
+            Some(m) => Ok(OwnedFd::from(m.into_inner().unwrap().sock)),
+            None => Err("Arc::into_inner returned None"),
+        };
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use std::os::unix::io::AsRawFd;
@@ -256,5 +268,21 @@ mod tests {
         backend
             .shared_object_add(&VhostUserSharedMsg::default())
             .unwrap();
+    }
+
+    #[test]
+    fn backend_to_ownedfd() {
+        let (p1, p2) = UnixStream::pair().unwrap();
+        let mut frontend = Endpoint::<VhostUserMsgHeader<BackendReq>>::from_stream(p1);
+        let frontend_client1 = Backend::from_stream(p2);
+        let sock = UnixStream::from(OwnedFd::try_from(frontend_client1).unwrap());
+        let mut frontend_client2 = Endpoint::<VhostUserMsgHeader<BackendReq>>::from_stream(sock);
+
+        let buf1 = [0x1, 0x2, 0x3, 0x4];
+        let len = frontend_client2.send_slice(&buf1[..], None).unwrap();
+        assert_eq!(len, 4);
+        let (bytes, buf2, _) = frontend.recv_into_buf(0x1000).unwrap();
+        assert_eq!(bytes, 4);
+        assert_eq!(&buf1[..], &buf2[..bytes]);
     }
 }
